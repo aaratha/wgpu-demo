@@ -21,6 +21,7 @@ struct State<'a> {
     // it gets dropped after it as the surface contains
     // unsafe references to the window's resources.
     window: &'a Window,
+    color: wgpu::Color,
 }
 
 impl<'a> State<'a> {
@@ -88,6 +89,12 @@ impl<'a> State<'a> {
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
+        let color = wgpu::Color {
+            r: 0.1,
+            g: 0.2,
+            b: 0.3,
+            a: 1.0,
+        };
 
         Self {
             window,
@@ -96,6 +103,7 @@ impl<'a> State<'a> {
             queue,
             config,
             size,
+            color,
         }
     }
 
@@ -136,12 +144,7 @@ impl<'a> State<'a> {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.1,
-                            g: 0.2,
-                            b: 0.3,
-                            a: 1.0,
-                        }),
+                        load: wgpu::LoadOp::Clear(self.color),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -193,8 +196,7 @@ pub async fn run() {
     }
 
     let mut state = State::new(&window).await;
-        let mut surface_configured = false;
-
+    let mut surface_configured = false;
 
     event_loop.run(move |event, control_flow| {
         match event {
@@ -218,6 +220,10 @@ pub async fn run() {
                         WindowEvent::Resized(physical_size) => {
                             surface_configured = true;
                             state.resize(*physical_size);
+                        }
+                        WindowEvent::CursorMoved { position, .. } => {
+                            log::info!("Mouse moved to: {:?}", position);
+                            state.color.r = (position.x / state.size.width as f64).clamp(0.0, 1.0);
                         }
                         WindowEvent::RedrawRequested => {
                             // This tells winit that we want another frame after this one
