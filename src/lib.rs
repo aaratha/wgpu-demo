@@ -1,3 +1,4 @@
+use wgpu::util::DeviceExt;
 use winit::{
     event::*,
     event_loop::EventLoop,
@@ -5,12 +6,14 @@ use winit::{
     window::{Window, WindowBuilder},
 };
 
-use wgpu::util::DeviceExt;
-
+use rand::rngs::SmallRng;
+use rand::{Rng, SeedableRng};
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
-// lib.rs
+const NUM_CIRCLES: usize = 10;
+const CIRCLE_SEGMENTS: usize = 32;
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct Vertex {
@@ -18,32 +21,6 @@ struct Vertex {
     color: [f32; 3],
 }
 
-const VERTICES: &[Vertex] = &[
-    Vertex {
-        position: [-0.0868241, 0.49240386, 0.0],
-        color: [0.5, 0.0, 0.5],
-    }, // A
-    Vertex {
-        position: [-0.49513406, 0.06958647, 0.0],
-        color: [0.5, 0.0, 0.5],
-    }, // B
-    Vertex {
-        position: [-0.21918549, -0.44939706, 0.0],
-        color: [0.5, 0.0, 0.5],
-    }, // C
-    Vertex {
-        position: [0.35966998, -0.3473291, 0.0],
-        color: [0.5, 0.0, 0.5],
-    }, // D
-    Vertex {
-        position: [0.44147372, 0.2347359, 0.0],
-        color: [0.5, 0.0, 0.5],
-    }, // E
-];
-
-const INDICES: &[u16] = &[0, 1, 4, 1, 2, 4, 2, 3, 4];
-
-// lib.rs
 impl Vertex {
     fn desc() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
@@ -65,15 +42,68 @@ impl Vertex {
     }
 }
 
+fn generate_circle(center: [f32; 2], radius: f32, color: [f32; 3]) -> (Vec<Vertex>, Vec<u16>) {
+    let mut vertices = Vec::with_capacity(CIRCLE_SEGMENTS + 1);
+    let mut indices = Vec::with_capacity(CIRCLE_SEGMENTS * 3);
+
+    // Center vertex
+    vertices.push(Vertex {
+        position: [center[0], center[1], 0.0],
+        color,
+    });
+
+    // Generate circle vertices
+    for i in 0..CIRCLE_SEGMENTS {
+        let angle = (i as f32 / CIRCLE_SEGMENTS as f32) * 2.0 * std::f32::consts::PI;
+        let x = center[0] + radius * angle.cos();
+        let y = center[1] + radius * angle.sin();
+        vertices.push(Vertex {
+            position: [x, y, 0.0],
+            color,
+        });
+    }
+
+    // Generate indices for triangles
+    for i in 0..CIRCLE_SEGMENTS {
+        indices.push(0); // Center
+        indices.push(1 + i as u16);
+        indices.push(1 + ((i + 1) % CIRCLE_SEGMENTS) as u16);
+    }
+
+    (vertices, indices)
+}
+
+fn generate_random_circles() -> (Vec<Vertex>, Vec<u16>) {
+    let mut rng = SmallRng::from_entropy();
+    let mut all_vertices = Vec::new();
+    let mut all_indices = Vec::new();
+
+    for _ in 0..NUM_CIRCLES {
+        let x = rng.gen_range(-0.8..0.8);
+        let y = rng.gen_range(-0.8..0.8);
+        let radius = rng.gen_range(0.05..0.15);
+        let color = [
+            rng.gen_range(0.0..1.0),
+            rng.gen_range(0.0..1.0),
+            rng.gen_range(0.0..1.0),
+        ];
+
+        let (vertices, indices) = generate_circle([x, y], radius, color);
+
+        let index_offset = all_vertices.len() as u16;
+        all_vertices.extend(vertices);
+        all_indices.extend(indices.iter().map(|i| i + index_offset));
+    }
+
+    (all_vertices, all_indices)
+}
+
 struct State<'a> {
     surface: wgpu::Surface<'a>,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     size: winit::dpi::PhysicalSize<u32>,
-    // The window must be declared after the surface so
-    // it gets dropped after it as the surface contains
-    // unsafe references to the window's resources.
     window: &'a Window,
     render_pipeline: wgpu::RenderPipeline,
     vertex_buffer: wgpu::Buffer,
@@ -82,12 +112,9 @@ struct State<'a> {
 }
 
 impl<'a> State<'a> {
-    // Creating some of the wgpu types requires async code
     async fn new(window: &'a Window) -> State<'a> {
         let size = window.inner_size();
 
-        // The instance is a handle to our GPU
-        // Backends::all => Vulkan + Metal + DX12 + Browser WebGPU
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             #[cfg(not(target_arch = "wasm32"))]
             backends: wgpu::Backends::PRIMARY,
@@ -111,8 +138,6 @@ impl<'a> State<'a> {
             .request_device(
                 &wgpu::DeviceDescriptor {
                     required_features: wgpu::Features::empty(),
-                    // WebGL doesn't support all of wgpu's features, so if
-                    // we're building for the web, we'll have to disable some.
                     required_limits: if cfg!(target_arch = "wasm32") {
                         wgpu::Limits::downlevel_webgl2_defaults()
                     } else {
@@ -121,21 +146,19 @@ impl<'a> State<'a> {
                     label: None,
                     memory_hints: Default::default(),
                 },
-                None, // Trace path
+                None,
             )
             .await
             .unwrap();
 
         let surface_caps = surface.get_capabilities(&adapter);
-        // Shader code in this tutorial assumes an sRGB surface texture. Using a different
-        // one will result in all the colors coming out darker. If you want to support non
-        // sRGB surfaces, you'll need to account for that when drawing to the frame.
         let surface_format = surface_caps
             .formats
             .iter()
             .find(|f| f.is_srgb())
             .copied()
             .unwrap_or(surface_caps.formats[0]);
+
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: surface_format,
@@ -164,16 +187,14 @@ impl<'a> State<'a> {
             layout: Some(&render_pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
-                entry_point: "vs_main", // 1.
+                entry_point: "vs_main",
                 buffers: &[Vertex::desc()],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: Some(wgpu::FragmentState {
-                // 3.
                 module: &shader,
                 entry_point: "fs_main",
                 targets: &[Some(wgpu::ColorTargetState {
-                    // 4.
                     format: config.format,
                     blend: Some(wgpu::BlendState::REPLACE),
                     write_mask: wgpu::ColorWrites::ALL,
@@ -181,41 +202,39 @@ impl<'a> State<'a> {
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             }),
             primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList, // 1.
+                topology: wgpu::PrimitiveTopology::TriangleList,
                 strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw, // 2.
+                front_face: wgpu::FrontFace::Ccw,
                 cull_mode: Some(wgpu::Face::Back),
-                // Setting this to anything other than Fill requires Features::NON_FILL_POLYGON_MODE
                 polygon_mode: wgpu::PolygonMode::Fill,
-                // Requires Features::DEPTH_CLIP_CONTROL
                 unclipped_depth: false,
-                // Requires Features::CONSERVATIVE_RASTERIZATION
                 conservative: false,
             },
-            depth_stencil: None, // 1.
+            depth_stencil: None,
             multisample: wgpu::MultisampleState {
-                count: 1,                         // 2.
-                mask: !0,                         // 3.
-                alpha_to_coverage_enabled: false, // 4.
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
             },
-            multiview: None, // 5.
-            cache: None,     // 6.
+            multiview: None,
+            cache: None,
         });
 
-        // new()
+        let (vertices, indices) = generate_random_circles();
+
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Vertex Buffer"),
-            contents: bytemuck::cast_slice(VERTICES),
+            contents: bytemuck::cast_slice(&vertices),
             usage: wgpu::BufferUsages::VERTEX,
         });
 
         let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Index Buffer"),
-            contents: bytemuck::cast_slice(INDICES),
+            contents: bytemuck::cast_slice(&indices),
             usage: wgpu::BufferUsages::INDEX,
         });
 
-        let num_indices = INDICES.len() as u32;
+        let num_indices = indices.len() as u32;
 
         Self {
             window,
@@ -227,7 +246,6 @@ impl<'a> State<'a> {
             render_pipeline,
             vertex_buffer,
             index_buffer,
-
             num_indices,
         }
     }
@@ -236,7 +254,6 @@ impl<'a> State<'a> {
         &self.window
     }
 
-    // impl State
     pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
         if new_size.width > 0 && new_size.height > 0 {
             self.size = new_size;
@@ -257,11 +274,13 @@ impl<'a> State<'a> {
         let view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("Render Encoder"),
             });
+
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Render Pass"),
@@ -282,13 +301,13 @@ impl<'a> State<'a> {
                 occlusion_query_set: None,
                 timestamp_writes: None,
             });
-            render_pass.set_pipeline(&self.render_pipeline); // 2.
+
+            render_pass.set_pipeline(&self.render_pipeline);
             render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-            render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16); // 1.
-            render_pass.draw_indexed(0..self.num_indices, 0, 0..1); // 2.
+            render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+            render_pass.draw_indexed(0..self.num_indices, 0, 0..1);
         }
 
-        // submit will accept anything that implements IntoIter
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
 
@@ -312,8 +331,6 @@ pub async fn run() {
 
     #[cfg(target_arch = "wasm32")]
     {
-        // Winit prevents sizing with CSS, so we have to set
-        // the size manually when on web.
         use winit::dpi::PhysicalSize;
         let _ = window.request_inner_size(PhysicalSize::new(450, 400));
 
@@ -332,61 +349,53 @@ pub async fn run() {
     let mut state = State::new(&window).await;
     let mut surface_configured = false;
 
-    event_loop.run(move |event, control_flow| {
-        match event {
-            Event::WindowEvent {
-                ref event,
-                window_id,
-            } if window_id == state.window().id() => {
-                if !state.input(event) {
-                    // UPDATED!
-                    match event {
-                        WindowEvent::CloseRequested
-                        | WindowEvent::KeyboardInput {
-                            event:
-                                KeyEvent {
-                                    state: ElementState::Pressed,
-                                    physical_key: PhysicalKey::Code(KeyCode::Escape),
-                                    ..
-                                },
-                            ..
-                        } => control_flow.exit(),
-                        WindowEvent::Resized(physical_size) => {
-                            surface_configured = true;
-                            state.resize(*physical_size);
-                        }
-                        WindowEvent::RedrawRequested => {
-                            // This tells winit that we want another frame after this one
-                            state.window().request_redraw();
-
-                            if !surface_configured {
-                                return;
-                            }
-
-                            state.update();
-                            match state.render() {
-                                Ok(_) => {}
-                                // Reconfigure the surface if it's lost or outdated
-                                Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
-                                    state.resize(state.size)
-                                }
-                                // The system is out of memory, we should probably quit
-                                Err(wgpu::SurfaceError::OutOfMemory) => {
-                                    log::error!("OutOfMemory");
-                                    control_flow.exit();
-                                }
-
-                                // This happens when the a frame takes too long to present
-                                Err(wgpu::SurfaceError::Timeout) => {
-                                    log::warn!("Surface timeout")
-                                }
-                            }
-                        }
-                        _ => {}
+    event_loop.run(move |event, control_flow| match event {
+        Event::WindowEvent {
+            ref event,
+            window_id,
+        } if window_id == state.window().id() => {
+            if !state.input(event) {
+                match event {
+                    WindowEvent::CloseRequested
+                    | WindowEvent::KeyboardInput {
+                        event:
+                            KeyEvent {
+                                state: ElementState::Pressed,
+                                physical_key: PhysicalKey::Code(KeyCode::Escape),
+                                ..
+                            },
+                        ..
+                    } => control_flow.exit(),
+                    WindowEvent::Resized(physical_size) => {
+                        surface_configured = true;
+                        state.resize(*physical_size);
                     }
+                    WindowEvent::RedrawRequested => {
+                        state.window().request_redraw();
+
+                        if !surface_configured {
+                            return;
+                        }
+
+                        state.update();
+                        match state.render() {
+                            Ok(_) => {}
+                            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+                                state.resize(state.size)
+                            }
+                            Err(wgpu::SurfaceError::OutOfMemory) => {
+                                log::error!("OutOfMemory");
+                                control_flow.exit();
+                            }
+                            Err(wgpu::SurfaceError::Timeout) => {
+                                log::warn!("Surface timeout")
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
-            _ => {}
         }
+        _ => {}
     });
 }
